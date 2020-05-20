@@ -1,7 +1,7 @@
 use crate::{
     backend::native_gpu_future, BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource,
     BindingType, BufferDescriptor, CommandEncoderDescriptor, ComputePipelineDescriptor,
-    PipelineLayoutDescriptor, RenderPipelineDescriptor, SamplerDescriptor, TextureDescriptor,
+    PipelineLayoutDescriptor, RenderPipelineDescriptor, MeshPipelineDescriptor, SamplerDescriptor, TextureDescriptor,
     TextureViewDescriptor, TextureViewDimension,
 };
 
@@ -68,6 +68,9 @@ mod pass_impl {
     impl crate::RenderPassInner<Context> for wgc::command::RawPass {
         fn set_pipeline(&mut self, pipeline: &wgc::id::RenderPipelineId) {
             unsafe { wgpu_render_pass_set_pipeline(self, *pipeline) }
+        }
+        fn set_mesh_pipeline(&mut self, pipeline: &wgc::id::RenderPipelineId) {
+            unsafe { wgpu_render_pass_set_mesh_pipeline(self, *pipeline) }
         }
         fn set_bind_group(
             &mut self,
@@ -161,6 +164,14 @@ mod pass_impl {
         ) {
             unsafe {
                 wgpu_render_pass_draw_indexed_indirect(self, *indirect_buffer, indirect_offset)
+            }
+        }
+        fn draw_mesh_tasks(&mut self, tasks: u32) {
+            unsafe {
+                wgpu_render_pass_draw_mesh_tasks(
+                    self,
+                    tasks
+                )
             }
         }
     }
@@ -500,6 +511,75 @@ impl crate::Context for Context {
         ))
     }
 
+    fn device_create_mesh_pipeline(
+        &self,
+        device: &Self::DeviceId,
+        desc: &MeshPipelineDescriptor,
+    ) -> Self::RenderPipelineId {
+        use wgc::pipeline as pipe;
+
+        let (_task_entry_point, task_stage) =
+            if let Some(task_stage) = &desc.task_stage {
+                let task_entry_point = CString::new(task_stage.entry_point).unwrap();
+                let task_stage = pipe::ProgrammableStageDescriptor {
+                    module: task_stage.module.id,
+                    entry_point: task_entry_point.as_ptr(),
+                };
+                (task_entry_point, Some(task_stage))
+            } else {
+                (CString::default(), None)
+            };
+
+        let mesh_entry_point = CString::new(desc.mesh_stage.entry_point).unwrap();
+        let mesh_stage = pipe::ProgrammableStageDescriptor {
+            module: desc.mesh_stage.module.id,
+            entry_point: mesh_entry_point.as_ptr(),
+        };
+
+        let (_fragment_entry_point, fragment_stage) =
+            if let Some(fragment_stage) = &desc.fragment_stage {
+                let fragment_entry_point = CString::new(fragment_stage.entry_point).unwrap();
+                let fragment_stage = pipe::ProgrammableStageDescriptor {
+                    module: fragment_stage.module.id,
+                    entry_point: fragment_entry_point.as_ptr(),
+                };
+                (fragment_entry_point, Some(fragment_stage))
+            } else {
+                (CString::default(), None)
+            };
+
+        let temp_color_states = desc.color_states.to_vec();
+
+        gfx_select!(*device => self.device_create_mesh_pipeline(
+            *device,
+            &pipe::MeshPipelineDescriptor {
+                layout: desc.layout.id,
+                task_stage: task_stage
+                    .as_ref()
+                    .map_or(ptr::null(), |ts| ts as *const _),
+                mesh_stage,
+                fragment_stage: fragment_stage
+                    .as_ref()
+                    .map_or(ptr::null(), |fs| fs as *const _),
+                rasterization_state: desc
+                    .rasterization_state
+                    .as_ref()
+                    .map_or(ptr::null(), |p| p as *const _),
+                primitive_topology: desc.primitive_topology,
+                color_states: temp_color_states.as_ptr(),
+                color_states_length: temp_color_states.len(),
+                depth_stencil_state: desc
+                    .depth_stencil_state
+                    .as_ref()
+                    .map_or(ptr::null(), |p| p as *const _),
+                sample_count: desc.sample_count,
+                sample_mask: desc.sample_mask,
+                alpha_to_coverage_enabled: desc.alpha_to_coverage_enabled,
+            },
+            PhantomData
+        ))
+    }
+
     fn device_create_buffer_mapped<'a>(
         &self,
         device: &Self::DeviceId,
@@ -730,6 +810,9 @@ impl crate::Context for Context {
     }
     fn render_pipeline_drop(&self, pipeline: &Self::RenderPipelineId) {
         gfx_select!(*pipeline => self.render_pipeline_destroy(*pipeline))
+    }
+    fn mesh_pipeline_drop(&self, pipeline: &Self::RenderPipelineId) {
+        gfx_select!(*pipeline => self.mesh_pipeline_destroy(*pipeline))
     }
 
     fn flush_mapped_data(_data: &mut [u8], _detail: CreateBufferMappedDetail) {}

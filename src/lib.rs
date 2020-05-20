@@ -48,6 +48,7 @@ trait ComputePassInner<Ctx: Context> {
 
 trait RenderPassInner<Ctx: Context> {
     fn set_pipeline(&mut self, pipeline: &Ctx::RenderPipelineId);
+    fn set_mesh_pipeline(&mut self, pipeline: &Ctx::RenderPipelineId);
     fn set_bind_group(
         &mut self,
         index: u32,
@@ -87,6 +88,7 @@ trait RenderPassInner<Ctx: Context> {
         indirect_buffer: &Ctx::BufferId,
         indirect_offset: BufferAddress,
     );
+    fn draw_mesh_tasks(&mut self, tasks: u32);
 }
 
 trait Context: Sized {
@@ -176,6 +178,11 @@ trait Context: Sized {
         device: &Self::DeviceId,
         desc: &ComputePipelineDescriptor,
     ) -> Self::ComputePipelineId;
+    fn device_create_mesh_pipeline(
+        &self,
+        device: &Self::DeviceId,
+        desc: &MeshPipelineDescriptor,
+    ) -> Self::RenderPipelineId;
     fn device_create_buffer_mapped<'a>(
         &self,
         device: &Self::DeviceId,
@@ -238,6 +245,7 @@ trait Context: Sized {
     fn command_buffer_drop(&self, command_buffer: &Self::CommandBufferId);
     fn compute_pipeline_drop(&self, pipeline: &Self::ComputePipelineId);
     fn render_pipeline_drop(&self, pipeline: &Self::RenderPipelineId);
+    fn mesh_pipeline_drop(&self, pipeline: &Self::RenderPipelineId);
 
     fn encoder_copy_buffer_to_buffer(
         &self,
@@ -505,6 +513,16 @@ pub struct ComputePipeline {
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
         self.context.compute_pipeline_drop(&self.id);
+    }
+}
+pub struct MeshPipeline {
+    context: Arc<C>,
+    id: <C as Context>::RenderPipelineId,
+}
+
+impl Drop for MeshPipeline {
+    fn drop(&mut self) {
+        self.context.mesh_pipeline_drop(&self.id);
     }
 }
 
@@ -792,6 +810,47 @@ pub struct ComputePipelineDescriptor<'a> {
     pub compute_stage: ProgrammableStageDescriptor<'a>,
 }
 
+/// A complete description of a mesh (graphics) pipeline.
+#[derive(Clone)]
+pub struct MeshPipelineDescriptor<'a> {
+    /// The layout of bind groups for this pipeline.
+    pub layout: &'a PipelineLayout,
+
+    /// The compiled task stage and its entry point, if any.
+    pub task_stage: Option<ProgrammableStageDescriptor<'a>>,
+
+    /// The compiled mesh stage and its entry point.
+    pub mesh_stage: ProgrammableStageDescriptor<'a>,
+
+    /// The compiled fragment stage and its entry point, if any.
+    pub fragment_stage: Option<ProgrammableStageDescriptor<'a>>,
+
+    /// The rasterization process for this pipeline.
+    pub rasterization_state: Option<RasterizationStateDescriptor>,
+
+    /// The primitive topology used to interpret vertices.
+    pub primitive_topology: PrimitiveTopology,
+
+    /// The effect of draw calls on the color aspect of the output target.
+    pub color_states: &'a [ColorStateDescriptor],
+
+    /// The effect of draw calls on the depth and stencil aspects of the output target, if any.
+    pub depth_stencil_state: Option<DepthStencilStateDescriptor>,
+
+    /// The number of samples calculated per pixel (for MSAA).
+    pub sample_count: u32,
+
+    /// Bitmask that restricts the samples of a pixel modified by this pipeline.
+    pub sample_mask: u32,
+
+    /// When enabled, produces another sample mask per pixel based on the alpha output value, that
+    /// is ANDed with the sample_mask and the primitive coverage to restrict the set of samples
+    /// affected by a primitive.
+    /// The implicit mask produced for alpha of zero is guaranteed to be zero, and for alpha of one
+    /// is guaranteed to be all 1-s.
+    pub alpha_to_coverage_enabled: bool,
+}
+
 pub type RenderPassColorAttachmentDescriptor<'a> =
     wgt::RenderPassColorAttachmentDescriptorBase<&'a TextureView>;
 pub type RenderPassDepthStencilAttachmentDescriptor<'a> =
@@ -1005,7 +1064,7 @@ impl Adapter {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn get_info(&self) -> AdapterInfo {
-        //wgn::adapter_get_info(self.id)
+        // wgn::adapter_get_info(self.id)
         unimplemented!()
     }
 }
@@ -1070,6 +1129,14 @@ impl Device {
         ComputePipeline {
             context: Arc::clone(&self.context),
             id: Context::device_create_compute_pipeline(&*self.context, &self.id, desc),
+        }
+    }
+
+    /// Creates a render pipeline.
+    pub fn create_mesh_pipeline(&self, desc: &MeshPipelineDescriptor) -> MeshPipeline {
+        MeshPipeline {
+            context: Arc::clone(&self.context),
+            id: Context::device_create_mesh_pipeline(&*self.context, &self.id, desc),
         }
     }
 
@@ -1413,6 +1480,10 @@ impl<'a> RenderPass<'a> {
         RenderPassInner::set_pipeline(&mut self.id, &pipeline.id)
     }
 
+    pub fn set_mesh_pipeline(&mut self, pipeline: &'a MeshPipeline) {
+        RenderPassInner::set_mesh_pipeline(&mut self.id, &pipeline.id)
+    }
+
     pub fn set_blend_color(&mut self, color: Color) {
         self.id.set_blend_color(color)
     }
@@ -1532,6 +1603,11 @@ impl<'a> RenderPass<'a> {
     ) {
         self.id
             .draw_indexed_indirect(&indirect_buffer.id, indirect_offset);
+    }
+
+    /// Draws primitives based on task and mesh shaders.
+    pub fn draw_mesh_tasks(&mut self, tasks: u32) {
+        RenderPassInner::draw_mesh_tasks(&mut self.id, tasks)
     }
 }
 

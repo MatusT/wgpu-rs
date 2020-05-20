@@ -11,20 +11,22 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
     let adapter = instance
         .request_adapter(
             &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::Default,
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
             },
-            wgpu::BackendBit::PRIMARY,
+            wgpu::BackendBit::VULKAN,
         )
         .await
         .unwrap();
+
+    // println!("{:?}", adapter.get_info().name);
 
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
                 extensions: wgpu::Extensions {
                     anisotropic_filtering: false,
-                    mesh_shaders: false,
+                    mesh_shaders: true,
                 },
                 limits: wgpu::Limits::default(),
             },
@@ -33,22 +35,37 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
         .await
         .unwrap();
 
-    let vs = include_bytes!("shader.vert.spv");
-    let vs_module =
-        device.create_shader_module(&wgpu::read_spirv(std::io::Cursor::new(&vs[..])).unwrap());
+    let ms = include_bytes!("triangles.mesh.spv");
+    let ms_module =
+        device.create_shader_module(&wgpu::read_spirv(std::io::Cursor::new(&ms[..])).unwrap());
 
-    let fs = include_bytes!("shader.frag.spv");
+    let fs = include_bytes!("triangles.frag.spv");
     let fs_module =
         device.create_shader_module(&wgpu::read_spirv(std::io::Cursor::new(&fs[..])).unwrap());
 
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        bind_group_layouts: &[],
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        bindings: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStage::MESH,
+                ty: wgpu::BindingType::StorageBuffer {
+                    dynamic: false,
+                    readonly: true,
+                },
+            }
+        ],
     });
 
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        bind_group_layouts: &[&bind_group_layout],
+    });
+
+    let mesh_pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
         layout: &pipeline_layout,
-        vertex_stage: wgpu::ProgrammableStageDescriptor {
-            module: &vs_module,
+        task_stage: None,
+        mesh_stage: wgpu::ProgrammableStageDescriptor {
+            module: &ms_module,
             entry_point: "main",
         },
         fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
@@ -70,10 +87,6 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
             write_mask: wgpu::ColorWrite::ALL,
         }],
         depth_stencil_state: None,
-        vertex_state: wgpu::VertexStateDescriptor {
-            index_format: wgpu::IndexFormat::Uint16,
-            vertex_buffers: &[],
-        },
         sample_count: 1,
         sample_mask: !0,
         alpha_to_coverage_enabled: false,
@@ -89,18 +102,37 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
 
     let mut swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+    let mut positions = Vec::new();
+    for x in -4..4 {
+        for y in -4..4 {
+            positions.push(x as f32 / 8.0);
+            positions.push(y as f32 / 8.0);
+        }
+    }
+    let positions_buffer = device.create_buffer_with_data(bytemuck::cast_slice(&positions), wgpu::BufferUsage::STORAGE);
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &bind_group_layout,
+        bindings: &[wgpu::Binding {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(positions_buffer.slice(0u64..(positions.len() * std::mem::size_of::<f32>()) as u64)),
+        }],
+        label: None,
+    });
+
     event_loop.run(move |event, _, control_flow| {
         // force ownership by the closure
         let _ = (
             &instance,
             &adapter,
-            &vs_module,
+            &ms_module,
             &fs_module,
             &pipeline_layout,
         );
 
         *control_flow = ControlFlow::Poll;
         match event {
+            Event::MainEventsCleared => window.request_redraw(),
             Event::WindowEvent {
                 event: WindowEvent::Resized(size),
                 ..
@@ -113,6 +145,7 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
                 let frame = swap_chain
                     .get_next_texture()
                     .expect("Timeout when acquiring next swap chain texture");
+
                 let mut encoder =
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                 {
@@ -126,8 +159,9 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
                         }],
                         depth_stencil_attachment: None,
                     });
-                    rpass.set_pipeline(&render_pipeline);
-                    rpass.draw(0..3, 0..1);
+                    rpass.set_bind_group(0, &bind_group, &[]);
+                    rpass.set_mesh_pipeline(&mesh_pipeline);
+                    rpass.draw_mesh_tasks(1);
                 }
 
                 queue.submit(Some(encoder.finish()));
@@ -144,6 +178,7 @@ async fn run(event_loop: EventLoop<()>, window: Window, swapchain_format: wgpu::
 fn main() {
     let event_loop = EventLoop::new();
     let window = winit::window::Window::new(&event_loop).unwrap();
+    window.set_outer_position(winit::dpi::PhysicalPosition { x: 800, y: 600 });
     #[cfg(not(target_arch = "wasm32"))]
     {
         env_logger::init();

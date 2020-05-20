@@ -27,6 +27,8 @@ pub enum ShaderStage {
     Vertex,
     Fragment,
     Compute,
+    Task,
+    Mesh,
 }
 
 pub trait Example: 'static + Sized {
